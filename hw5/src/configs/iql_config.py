@@ -87,6 +87,7 @@ def iql_config(
             "target_update_rate": target_update_rate,
             "alpha": alpha,
             "expectile": expectile,
+            "ensemble_aggregation": ensemble_aggregation,
         },
         "agent": "iql",
         "log_name": log_string,

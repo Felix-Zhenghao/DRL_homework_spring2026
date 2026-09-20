@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
-"""Run a uv command on an existing Slurm GPU allocation, via fe.ds.
+r"""Run a uv command on an existing Slurm GPU allocation, via fe.ds.
 
 Example (run locally, without installing the homework's dependencies):
     python3 src/scripts/ssh_run.py -- python src/scripts/run.py --base_config=iql
+
+Parallel training on the same GPU:
+    python3 src/scripts/ssh_run.py --njobs=2 -- \
+        "JOB --base_config=iql --seed=0" "JOB --base_config=iql --seed=1"
 """
 
 import argparse
+import os
 import posixpath
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path, PurePosixPath
 
 
@@ -26,10 +33,14 @@ SSH_OPTIONS = [
     "-o", "ServerAliveCountMax=3",
 ]
 SOURCE_FILES = ("src", "pyproject.toml", "uv.lock", "requirements.txt", "README.md")
+PARALLEL_ENTRYPOINT = (
+    "import sys; from scripts.ssh_run import run_jobs; "
+    "sys.exit(run_jobs(sys.argv[2:], int(sys.argv[1])))"
+)
 
 
-def ssh_command(host, command):
-    return ["ssh", "-T", *SSH_OPTIONS, host, command]
+def ssh_command(host, command, tty=False):
+    return ["ssh", "-tt" if tty else "-T", *SSH_OPTIONS, host, command]
 
 
 def remote_output(frontend, command):
@@ -69,11 +80,141 @@ def select_node(args):
     )
 
 
-def gpu_command(args, node, command):
+def gpu_command(args, node, command, tty=False):
     # Authenticate the second hop from the frontend, just as with interactive
     # `ssh fe.ds` followed by `ssh l001`; no local compute-node key is needed.
-    inner = ssh_command(f"{args.user}@{node}", shlex.join(["bash", "-lc", command]))
-    return ssh_command(args.frontend, shlex.join(inner))
+    inner = ssh_command(f"{args.user}@{node}", shlex.join(["bash", "-lc", command]), tty=tty)
+    return ssh_command(args.frontend, shlex.join(inner), tty=tty)
+
+
+def split_job_specs(job_specs):
+    if not job_specs:
+        raise ValueError("--njobs requires at least one quoted 'JOB ...' specification")
+    jobs = []
+    for index, spec in enumerate(job_specs, 1):
+        try:
+            words = shlex.split(spec)
+        except ValueError as exc:
+            raise ValueError(f"Job {index}: {exc}") from exc
+        if not words or words[0] != "JOB":
+            raise ValueError(f"Job {index} must be a quoted 'JOB <run.py arguments>' string")
+        if any(word.split("=", 1)[0] == "--njobs" for word in words[1:]):
+            raise ValueError(f"Job {index}: set --njobs on ssh_run.py, not inside a JOB")
+        jobs.append(words[1:])
+    return jobs
+
+
+def stop_jobs(running):
+    """Terminate each worker's process group, including its child processes."""
+    for _, process, _ in running:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 5
+    for _, process, log in running:
+        try:
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        finally:
+            # The worker may exit before a child that ignored SIGTERM.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            log.close()
+
+
+def run_jobs(job_specs, njobs):
+    """Run on the GPU node, inside one uv environment; no Modal is involved."""
+    # Import the training parser only remotely, keeping the local launcher
+    # dependency-free. Fresh Python processes give each agent its own CUDA state.
+    from scripts.run import get_run_name, setup_arguments
+
+    jobs, directories = [], set()
+    try:
+        if njobs < 1:
+            raise ValueError("--njobs must be a positive integer")
+        for index, argv in enumerate(split_job_specs(job_specs), 1):
+            args = setup_arguments(argv)
+            if args.njobs is not None or args.job_specs:
+                raise ValueError(f"Job {index} must describe a single training run")
+            directory = Path("exp") / args.run_group / get_run_name(args)
+            resolved = directory.resolve()
+            if resolved in directories:
+                raise ValueError(
+                    f"Job {index} shares output directory {directory} with another job; "
+                    "use distinct --seed or --exp_name values"
+                )
+            directories.add(resolved)
+            jobs.append((argv, directory))
+    except ValueError as exc:
+        print(f"ssh_run: {exc}", file=sys.stderr)
+        return 2
+
+    interrupted = None
+
+    def on_signal(signum, frame):
+        nonlocal interrupted
+        interrupted = signum
+
+    previous_handlers = {
+        sig: signal.signal(sig, on_signal)
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    }
+    running = []
+    next_job, status = 0, 0
+    print(f"Running {len(jobs)} training jobs, at most {njobs} concurrently.", flush=True)
+    try:
+        while next_job < len(jobs) or running:
+            if interrupted is not None:
+                print("Stopping running jobs and cancelling queued jobs.", flush=True)
+                return 128 + interrupted
+            while next_job < len(jobs) and len(running) < njobs and interrupted is None:
+                argv, directory = jobs[next_job]
+                index = next_job + 1
+                next_job += 1
+                directory.mkdir(parents=True, exist_ok=True)
+                log_path = directory / "console.log"
+                log = log_path.open("ab")
+                command = [sys.executable, "-u", "src/scripts/run.py", *argv]
+                timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                log.write(f"\n[{timestamp}] {shlex.join(command)}\n".encode())
+                log.flush()
+                try:
+                    process = subprocess.Popen(
+                        command, stdin=subprocess.DEVNULL, stdout=log,
+                        stderr=subprocess.STDOUT, start_new_session=True,
+                    )
+                except OSError:
+                    log.close()
+                    raise
+                running.append((index, process, log))
+                print(f"[job {index}/{len(jobs)}] Started PID {process.pid}; log: {log_path}", flush=True)
+            for entry in running[:]:
+                index, process, log = entry
+                returncode = process.poll()
+                if returncode is None:
+                    continue
+                log.close()
+                running.remove(entry)
+                code = returncode if returncode >= 0 else 128 - returncode
+                status = status or code
+                print(f"[job {index}/{len(jobs)}] Finished with exit code {code}.", flush=True)
+            if running:
+                time.sleep(0.1)
+        return status
+    finally:
+        try:
+            stop_jobs(running)
+        finally:
+            for sig, handler in previous_handlers.items():
+                signal.signal(sig, handler)
 
 
 def run_script(remote_dir, command):
@@ -147,7 +288,8 @@ def pull_results(args):
 def parse_args():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Everything after -- is passed to remote uv run. With no command, run.py is used.",
+        epilog=("After --, pass a uv run command or, with --njobs, quoted 'JOB ...' strings. "
+                "With no command, run.py is used."),
     )
     parser.add_argument("--frontend", default="fe.ds", help="SSH frontend alias (default: fe.ds)")
     parser.add_argument("--user", default="felix020422", help="Slurm and compute-node user")
@@ -155,11 +297,12 @@ def parse_args():
     parser.add_argument("--local-dir", type=Path, default=PROJECT_DIR, help="Local project directory for scp")
     parser.add_argument("--job-id", help="Use this running GPU allocation instead of the first one")
     parser.add_argument("--node", help="Choose a node belonging to your running GPU allocation")
+    parser.add_argument("--njobs", type=int, help="Run at most N training JOBs concurrently on the selected node")
     parser.add_argument("--push", action="store_true", help="scp source and project metadata before running")
     parser.add_argument("--pull", action="store_true", help="scp exp/ back after running, including on failure")
     parser.add_argument("--sync-only", action="store_true", help="Only perform --push/--pull; no GPU allocation needed")
     parser.add_argument("--dry-run", action="store_true", help="Discover the GPU and print the command without writes")
-    parser.add_argument("command", nargs=argparse.REMAINDER, help="Arguments for remote uv run, after --")
+    parser.add_argument("command", nargs=argparse.REMAINDER, help="uv run arguments, or quoted JOB specs with --njobs")
     args = parser.parse_args()
     args.remote_dir = posixpath.normpath(args.remote_dir)
     if not PurePosixPath(args.remote_dir).is_relative_to(SCRATCH_DIR):
@@ -167,8 +310,15 @@ def parse_args():
     args.local_dir = args.local_dir.expanduser().resolve()
     if args.command[:1] == ["--"]:
         args.command = args.command[1:]
-    if args.sync_only and (args.command or not (args.push or args.pull)):
-        parser.error("--sync-only requires --push or --pull and does not take a command")
+    if args.sync_only and (args.command or args.njobs is not None or not (args.push or args.pull)):
+        parser.error("--sync-only requires --push or --pull and does not take a command or --njobs")
+    if args.njobs is not None:
+        if args.njobs < 1:
+            parser.error("--njobs must be a positive integer")
+        try:
+            split_job_specs(args.command)
+        except ValueError as exc:
+            parser.error(str(exc))
     args.command = args.command or ["python", "src/scripts/run.py"]
     return args
 
@@ -185,10 +335,19 @@ def main():
     job_id, node = select_node(args)
     print(f"Using Slurm job {job_id} on {node} via {args.frontend}", flush=True)
     print(f"Working directory: {args.remote_dir}", flush=True)
-    print(f"Running: uv run {shlex.join(args.command)}", flush=True)
+    if args.njobs is None:
+        remote_command = args.command
+        print(f"Running: uv run {shlex.join(remote_command)}", flush=True)
+    else:
+        remote_command = ["python", "-c", PARALLEL_ENTRYPOINT, str(args.njobs), *args.command]
+        print(f"Running {len(args.command)} JOBs with --njobs={args.njobs}", flush=True)
     if args.push:
         push_sources(args)
-    command = gpu_command(args, node, run_script(args.remote_dir, args.command))
+    # PTYs at both SSH hops propagate interrupts and hangups to the scheduler,
+    # allowing it to clean up workers when the connection closes.
+    command = gpu_command(
+        args, node, run_script(args.remote_dir, remote_command), tty=args.njobs is not None,
+    )
     if args.dry_run:
         print(shlex.join(command))
         status = 0
