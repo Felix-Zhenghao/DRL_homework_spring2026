@@ -1,3 +1,4 @@
+import os
 from typing import Optional, Tuple
 
 import gymnasium
@@ -55,7 +56,9 @@ def fql_config(
         return torch.optim.Adam(params, lr=learning_rate)
 
     def make_env_and_dataset() -> Tuple[gymnasium.Env, ReplayBuffer]:
-        env, train_dataset, _ = ogbench.make_env_and_datasets(env_name)
+        env, train_dataset, _ = ogbench.make_env_and_datasets(
+            env_name, dataset_dir=os.environ.get("OGBENCH_DATASET_DIR", "~/.ogbench/data")
+        )
         env = EpisodeMonitor(env, filter_regexes=['.*privileged.*', '.*proprio.*'])
         dataset = ReplayBuffer(capacity=len(train_dataset['observations']))
         dataset.size = len(train_dataset['observations'])

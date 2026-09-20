@@ -1,4 +1,4 @@
-"""Inspect the three homework datasets; missing files download to ~/.ogbench/data by default.
+"""Inspect the homework datasets; downloads use OGBENCH_DATASET_DIR or ~/.ogbench/data.
 
 Run all tasks: uv run src/scripts/inspect_datasets.py
 Run one task:  uv run src/scripts/inspect_datasets.py --task antmaze-medium
@@ -6,6 +6,7 @@ Choose cache:  uv run src/scripts/inspect_datasets.py --dataset-dir /path/to/dat
 """
 
 import argparse
+import os
 
 import numpy as np
 import ogbench
@@ -66,7 +67,7 @@ def main():
     parser.add_argument("--task", choices=DATASETS, help="Inspect one task (default: all three).")
     parser.add_argument(
         "--dataset-dir",
-        default="~/.ogbench/data",
+        default=os.environ.get("OGBENCH_DATASET_DIR", "~/.ogbench/data"),
         help="Directory for downloading and loading datasets (default: %(default)s).",
     )
     args = parser.parse_args()
