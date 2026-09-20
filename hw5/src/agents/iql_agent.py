@@ -95,7 +95,7 @@ class IQLAgent(nn.Module):
         # Therefore, the output shape of self.critic: (2, batch_size)
         # We use the minimum of the two Q networks as the Q to compute advantage.
         loss = self.iql_expectile_loss(
-            self.aggregation_func_chosen(self.target_critic(observations, actions), dim=0) - v if self.ensemble_aggregation == "mean" else self.aggregation_func_chosen(self.target_critic(observations, actions), dim=0)[0] - v,
+            self.aggregation_func_chosen(self.target_critic(observations, actions).detach(), dim=0) - v if self.ensemble_aggregation == "mean" else self.aggregation_func_chosen(self.target_critic(observations, actions), dim=0)[0] - v,
             self.expectile
         )
 
@@ -125,7 +125,7 @@ class IQLAgent(nn.Module):
         # TODO(student): Compute the Q loss
         q = self.critic(observations, actions) # output shape: (2, batch_size)
         
-        target = rewards + self.discount * dones * self.value(next_observations)
+        target = rewards + self.discount * (1-dones) * self.value(next_observations)
         target = target.detach() # stop gradient for target
         
         # target now has shape (batch_size, 1), change it to (2, batch_size) to match q's shape
@@ -158,7 +158,7 @@ class IQLAgent(nn.Module):
         # TODO(student): Compute the actor loss
         dist = self.actor(observations)
         
-        adv = self.aggregation_func_chosen(self.target_critic(observations, actions), dim=0) - self.value(observations) if self.ensemble_aggregation == "mean" else self.aggregation_func_chosen(self.target_critic(observations, actions), dim=0)[0] - self.value(observations)
+        adv = self.aggregation_func_chosen(self.critic(observations, actions), dim=0) - self.value(observations) if self.ensemble_aggregation == "mean" else self.aggregation_func_chosen(self.critic(observations, actions), dim=0)[0] - self.value(observations)
         
         weights = torch.clamp(torch.exp(adv * self.alpha).detach(), max=100.0)
         loss = torch.mean(
