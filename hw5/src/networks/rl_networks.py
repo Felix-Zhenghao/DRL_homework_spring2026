@@ -129,7 +129,7 @@ class VectorFieldPolicy(nn.Module):
     ):
         super().__init__()
         self.net = ptu.build_mlp(
-            input_size=ob_dim + ac_dim + 1,
+            input_size=ob_dim + ac_dim + 1, # the "1" is for the time
             output_size=ac_dim,
             n_layers=n_layers,
             size=layer_size,
@@ -143,6 +143,10 @@ class VectorFieldPolicy(nn.Module):
 
 
 class Value(nn.Module):
+    """
+    Single V(s) network.
+    """
+    
     def __init__(self, ob_dim, n_layers, size):
         super().__init__()
         self.net = ptu.build_mlp(
@@ -157,6 +161,10 @@ class Value(nn.Module):
 
 
 class EnsembleCritic(nn.Module):
+    """
+    Multiple Q(s,a) networks.
+    """
+    
     def __init__(self, ob_dim, ac_dim, n_layers, size, n_ensembles):
         super().__init__()
         self.net = ptu.build_ensemble_mlp(

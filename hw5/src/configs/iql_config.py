@@ -24,6 +24,7 @@ def iql_config(
     expectile: float = 0.9,
     total_steps: int = 1000000,
     batch_size: int = 256,
+    ensemble_aggregation: str = "min",
     **kwargs,
 ):
     def make_actor(observation_shape: Tuple[int, ...], action_dim: int) -> nn.Module:

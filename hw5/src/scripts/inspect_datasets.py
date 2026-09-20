@@ -1,7 +1,8 @@
-"""Inspect the three homework datasets; missing files download to ~/.ogbench/data.
+"""Inspect the three homework datasets; missing files download to ~/.ogbench/data by default.
 
 Run all tasks: uv run src/scripts/inspect_datasets.py
 Run one task:  uv run src/scripts/inspect_datasets.py --task antmaze-medium
+Choose cache:  uv run src/scripts/inspect_datasets.py --dataset-dir /path/to/datasets
 """
 
 import argparse
@@ -47,10 +48,10 @@ def inspect_split(name, dataset):
         print(f"    {key}: {values[0]}")
 
 
-def inspect_task(task):
+def inspect_task(task, dataset_dir):
     dataset_name = DATASETS[task]
     print(f"\n{'=' * 80}\n{task}: {dataset_name}", flush=True)
-    env, train, val = ogbench.make_env_and_datasets(dataset_name)
+    env, train, val = ogbench.make_env_and_datasets(dataset_name, dataset_dir=dataset_dir)
     try:
         print(f"Observation space: {env.observation_space}")
         print(f"Action space: {env.action_space}")
@@ -63,10 +64,15 @@ def inspect_task(task):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", choices=DATASETS, help="Inspect one task (default: all three).")
+    parser.add_argument(
+        "--dataset-dir",
+        default="~/.ogbench/data",
+        help="Directory for downloading and loading datasets (default: %(default)s).",
+    )
     args = parser.parse_args()
     np.set_printoptions(precision=3, suppress=True, linewidth=100)
     for task in [args.task] if args.task else DATASETS:
-        inspect_task(task)
+        inspect_task(task, args.dataset_dir)
 
 
 if __name__ == "__main__":

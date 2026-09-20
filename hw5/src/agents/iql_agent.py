@@ -8,6 +8,12 @@ from typing import Callable, Optional, Sequence, Tuple, List
 
 
 class IQLAgent(nn.Module):
+    aggregation_functions = {
+        "min": torch.min,
+        "mean": torch.mean,
+        "max": torch.max,
+    }
+    
     def __init__(
         self,
         observation_shape: Sequence[int],
@@ -24,14 +30,15 @@ class IQLAgent(nn.Module):
         target_update_rate: float,
         alpha: float,
         expectile: float,
+        ensemble_aggregation: str,
     ):
         super().__init__()
 
         self.actor = make_actor(observation_shape, action_dim)
-        self.critic = make_critic(observation_shape, action_dim)
+        self.critic = make_critic(observation_shape, action_dim) # Q(s,a)
         self.target_critic = make_critic(observation_shape, action_dim)
         self.target_critic.load_state_dict(self.critic.state_dict())
-        self.value = make_value(observation_shape)
+        self.value = make_value(observation_shape) # V(s)
 
         self.actor_optimizer = make_actor_optimizer(self.actor.parameters())
         self.critic_optimizer = make_critic_optimizer(self.critic.parameters())
@@ -41,6 +48,8 @@ class IQLAgent(nn.Module):
         self.target_update_rate = target_update_rate
         self.alpha = alpha
         self.expectile = expectile
+        self.ensemble_aggregation = ensemble_aggregation
+        self.aggregation_func_chosen = self.aggregation_functions[ensemble_aggregation]
 
     def get_action(self, observation: np.ndarray):
         """
@@ -59,7 +68,16 @@ class IQLAgent(nn.Module):
         Compute the expectile loss for IQL
         """
         # TODO(student): Implement the expectile loss
-        return ...
+        
+        # The expectile loss: we are more tolerant of positive advs.
+        # In this way, we encourage the V(s) to be the larger quantile of Q(s,a).
+        # Philosophically, this means we are optimisitc about ID actions.
+        loss_weight = torch.where(adv > 0, expectile, 1 - expectile)
+        
+        # Input: adv = Q(s,a) - V(s) with shape (batch_size, 1)
+        loss = loss_weight * (adv ** 2)
+        
+        return loss.mean()
 
     @torch.compile
     def update_v(
@@ -71,8 +89,15 @@ class IQLAgent(nn.Module):
         Update V(s) with expectile regression
         """
         # TODO(student): Compute the value loss
-        v = ...
-        loss = ...
+        v = self.value(observations) # output shape: (batch_size, 1)
+        
+        # Here we use an ensemble of two Q networks.
+        # Therefore, the output shape of self.critic: (2, batch_size)
+        # We use the minimum of the two Q networks as the Q to compute advantage.
+        loss = self.iql_expectile_loss(
+            self.aggregation_func_chosen(self.target_critic(observations, actions), dim=0) - v if self.ensemble_aggregation == "mean" else self.aggregation_func_chosen(self.target_critic(observations, actions), dim=0)[0] - v,
+            self.expectile
+        )
 
         self.value_optimizer.zero_grad()
         loss.backward()
@@ -98,8 +123,17 @@ class IQLAgent(nn.Module):
         Update Q(s, a)
         """
         # TODO(student): Compute the Q loss
-        q = ...
-        loss = ...
+        q = self.critic(observations, actions) # output shape: (2, batch_size)
+        
+        target = rewards + self.discount * dones * self.value(next_observations)
+        target = target.detach() # stop gradient for target
+        
+        # target now has shape (batch_size, 1), change it to (2, batch_size) to match q's shape
+        target = target.expand_as(q)
+        
+        loss = torch.sum(torch.mean(torch.square(
+            target - q
+        ), dim=1)) # mean over batch, sum over ensemble
 
         self.critic_optimizer.zero_grad()
         loss.backward()
@@ -122,8 +156,14 @@ class IQLAgent(nn.Module):
         Update the actor using advantage-weighted regression
         """
         # TODO(student): Compute the actor loss
-        dist = ...
-        loss = ...
+        dist = self.actor(observations)
+        
+        adv = self.aggregation_func_chosen(self.target_critic(observations, actions), dim=0) - self.value(observations) if self.ensemble_aggregation == "mean" else self.aggregation_func_chosen(self.target_critic(observations, actions), dim=0)[0] - self.value(observations)
+        
+        weights = torch.clamp(torch.exp(adv * self.alpha).detach(), max=100.0)
+        loss = torch.mean(
+            -dist.log_prob(actions) * weights
+        )
 
         self.actor_optimizer.zero_grad()
         loss.backward()
@@ -158,4 +198,7 @@ class IQLAgent(nn.Module):
 
     def update_target_critic(self) -> None:
         # TODO(student): Update target_critic using Polyak averaging with self.target_update_rate
-        ...
+        
+        # target_update_rate = 0.005
+        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
+            target_param.data.copy_(self.target_update_rate * param.data + (1 - self.target_update_rate) * target_param.data)
