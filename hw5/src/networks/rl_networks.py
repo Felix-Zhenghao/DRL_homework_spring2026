@@ -176,6 +176,7 @@ class EnsembleCritic(nn.Module):
         ).to(ptu.device)
 
     def forward(self, obs, acs):
+        """output: (n_ensembles, B)"""
         return self.net(torch.cat([obs, acs], dim=-1)).squeeze(-1)
 
 
