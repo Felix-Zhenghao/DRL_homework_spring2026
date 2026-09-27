@@ -55,8 +55,9 @@ class FQLAgent(nn.Module):
         
         # sample z ~ N(0,I_d) where d = self.action_dim
         z = torch.randn((1, self.action_dim), device=ptu.device)
-        v = self.onestep_actor(obs=observation, acs=z) # times is the will be set to default: 0
-        action = v + z
+        with torch.no_grad():
+            v = self.onestep_actor(obs=observation, acs=z) # times is the will be set to default: 0
+            action = v + z
         
         action = torch.clamp(action, -1, 1)
         return ptu.to_numpy(action)[0]
