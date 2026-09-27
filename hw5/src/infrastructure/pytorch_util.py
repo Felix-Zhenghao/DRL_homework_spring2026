@@ -71,8 +71,11 @@ class EnsembleMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, input_size)
-        ys = [mlp(x) for mlp in self.mlps]
-        return torch.stack(ys, dim=0)  # (n, B, output_size)
+        params = [dict(mlp.named_parameters()) for mlp in self.mlps]
+        stacked = {name: torch.stack([p[name] for p in params]) for name in params[0]}
+        return torch.vmap(
+            lambda p: torch.func.functional_call(self.mlps[0], p, (x,))
+        )(stacked)  # (n, B, output_size)
 
 
 def build_ensemble_mlp(
@@ -117,6 +120,7 @@ def init_gpu(use_gpu=True, gpu_id=0):
     global device
     if torch.cuda.is_available() and use_gpu:
         device = torch.device("cuda:" + str(gpu_id))
+        torch.set_float32_matmul_precision("high")
         print("Using GPU id {}".format(gpu_id))
     else:
         device = torch.device("cpu")

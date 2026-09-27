@@ -128,6 +128,7 @@ class QAMAgent(nn.Module):
         
         return {"bc_v_matching_loss": loss}
         
+    @torch.compile
     def update_actor(self, observations: torch.Tensor, actions: torch.Tensor):
         
         # step 0: sample actions from self.actor **and** store the intermediate actions for each flow step
@@ -187,16 +188,25 @@ class QAMAgent(nn.Module):
         
         # ======
 
-        loss = 0.0
+        adjoints, flow_times = [], []
         g = g1.clone()
         for i in reversed(range(self.flow_steps)):
             t = torch.full((observations.shape[0], 1), i/self.flow_steps, device=ptu.device)
             g = g + 1/self.flow_steps * vjp(g, t, intermediate_actions[i])
-            
-            # g is the target, now we compute the loss
-            u = self.actor(obs=observations, acs=intermediate_actions[i], times=t) - self.bc_actor(obs=observations, acs=intermediate_actions[i], times=t).detach()
-            
-            loss += 0.5 * F.mse_loss((1 + self.sigma(t)**2 * 0.5 * t / (1 - t) ) / self.sigma(t) * u, -self.sigma(t) * g)
+            adjoints.append(g)
+            flow_times.append(t)
+
+        # Batch the independent matching losses; retain the original sum over time.
+        xs = torch.cat(intermediate_actions, dim=0)
+        ts = torch.cat(flow_times[::-1], dim=0)
+        gs = torch.cat(adjoints[::-1], dim=0)
+        obs = observations.repeat(self.flow_steps, 1)
+        with torch.no_grad():
+            base_v = self.bc_actor(obs=obs, acs=xs, times=ts)
+        u = self.actor(obs=obs, acs=xs, times=ts) - base_v
+        sigmas = self.sigma(ts)
+        coefficient = (1 + 0.5 * sigmas**2 * ts / (1 - ts)) / sigmas
+        loss = 0.5 * self.flow_steps * F.mse_loss(coefficient * u, -sigmas * gs)
         
         self.actor_optimizer.zero_grad()
         loss.backward()
@@ -227,7 +237,10 @@ class QAMAgent(nn.Module):
 
         return metrics
 
+    @torch.no_grad()
     def update_target_critic(self) -> None:
-        # TODO(student): Update target_critic using Polyak averaging with self.target_update_rate
-        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
-            target_param.data.copy_(self.target_update_rate * param.data + (1 - self.target_update_rate) * target_param.data)
+        torch._foreach_lerp_(
+            list(self.target_critic.parameters()),
+            list(self.critic.parameters()),
+            self.target_update_rate,
+        )
