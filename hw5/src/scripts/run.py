@@ -26,6 +26,10 @@ def get_run_name(args: argparse.Namespace) -> str:
         exp_name = f"{exp_name}_a{args.alpha}"
     if args.expectile is not None:
         exp_name = f"{exp_name}_e{args.expectile}"
+    if args.use_bc_last_step_during_training:
+        exp_name += "_bc_last_step"
+    if args.clip_adj:
+        exp_name += "_clip_adj"
     return exp_name
 
 
@@ -206,6 +210,8 @@ def setup_arguments(args=None):
 
     parser.add_argument("--expectile", type=float, default=None)
     parser.add_argument("--alpha", type=float, default=None)
+    parser.add_argument("--use_bc_last_step_during_training", action="store_true")
+    parser.add_argument("--clip_adj", action="store_true")
 
     # For njobs mode (optional)
     parser.add_argument("--njobs", type=int, default=None)
@@ -244,6 +250,10 @@ def main(args, checkpoint_callback: Optional[Callable[[], None]] = None):
         config['agent_kwargs']['expectile'] = args.expectile
     if args.alpha is not None:
         config['agent_kwargs']['alpha'] = args.alpha
+    if args.use_bc_last_step_during_training:
+        config['agent_kwargs']['use_bc_last_step_during_training'] = True
+    if args.clip_adj:
+        config['agent_kwargs']['clip_adj'] = True
 
     wandb_run_path = os.path.join(args.save_dir, "wandb_run.json")
     wandb_run_id = None
