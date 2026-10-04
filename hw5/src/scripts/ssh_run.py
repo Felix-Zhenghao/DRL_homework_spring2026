@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""Run a uv command on an existing Slurm GPU allocation, via fe.ds.
+r"""Run a uv command in an existing Slurm GPU allocation, via fe.ds.
 
 Example (run locally, without installing the homework's dependencies):
     python3 src/scripts/ssh_run.py -- python src/scripts/run.py --base_config=iql
@@ -80,11 +80,17 @@ def select_node(args):
     )
 
 
-def gpu_command(args, node, command, tty=False):
-    # Authenticate the second hop from the frontend, just as with interactive
-    # `ssh fe.ds` followed by `ssh l001`; no local compute-node key is needed.
-    inner = ssh_command(f"{args.user}@{node}", shlex.join(["bash", "-lc", command]), tty=tty)
-    return ssh_command(args.frontend, shlex.join(inner), tty=tty)
+def gpu_command(args, job_id, node, command, tty=False):
+    # Direct SSH can be adopted into a different allocation when the user has
+    # multiple jobs on one node. srun enters the requested job's GPU cgroup.
+    step = [
+        "srun", f"--jobid={job_id}", "--overlap", "--nodes=1", "--ntasks=1",
+        f"--nodelist={node}",
+    ]
+    if tty:
+        step.append("--pty")
+    step.extend(["bash", "-lc", command])
+    return ssh_command(args.frontend, shlex.join(step), tty=tty)
 
 
 def split_job_specs(job_specs):
@@ -302,6 +308,7 @@ def parse_args():
     parser.add_argument("--pull", action="store_true", help="scp exp/ back after running, including on failure")
     parser.add_argument("--sync-only", action="store_true", help="Only perform --push/--pull; no GPU allocation needed")
     parser.add_argument("--dry-run", action="store_true", help="Discover the GPU and print the command without writes")
+    parser.add_argument("--launch-token", help=argparse.SUPPRESS)
     parser.add_argument("command", nargs=argparse.REMAINDER, help="uv run arguments, or quoted JOB specs with --njobs")
     args = parser.parse_args()
     args.remote_dir = posixpath.normpath(args.remote_dir)
@@ -343,10 +350,10 @@ def main():
         print(f"Running {len(args.command)} JOBs with --njobs={args.njobs}", flush=True)
     if args.push:
         push_sources(args)
-    # PTYs at both SSH hops propagate interrupts and hangups to the scheduler,
-    # allowing it to clean up workers when the connection closes.
+    # A PTY lets srun propagate hangups to the step when the connection closes.
     command = gpu_command(
-        args, node, run_script(args.remote_dir, remote_command), tty=args.njobs is not None,
+        args, job_id, node, run_script(args.remote_dir, remote_command),
+        tty=args.njobs is not None,
     )
     if args.dry_run:
         print(shlex.join(command))

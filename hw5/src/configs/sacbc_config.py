@@ -3,11 +3,11 @@ from typing import Optional, Tuple
 
 import gymnasium
 import numpy as np
-import ogbench
 import torch
 import torch.nn as nn
 
 import infrastructure.pytorch_util as ptu
+from infrastructure.ogbench_utils import make_env_and_datasets
 from infrastructure.replay_buffer import ReplayBuffer
 from infrastructure.utils import EpisodeMonitor
 from networks.rl_networks import Policy, EnsembleCritic, DeterministicPolicy, LogParam
@@ -53,7 +53,7 @@ def sacbc_config(
         return torch.optim.Adam(params, lr=learning_rate)
 
     def make_env_and_dataset() -> Tuple[gymnasium.Env, ReplayBuffer]:
-        env, train_dataset, _ = ogbench.make_env_and_datasets(
+        env, train_dataset, _ = make_env_and_datasets(
             env_name, dataset_dir=os.environ.get("OGBENCH_DATASET_DIR", "~/.ogbench/data")
         )
         env = EpisodeMonitor(env, filter_regexes=['.*privileged.*', '.*proprio.*'])

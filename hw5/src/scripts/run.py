@@ -33,17 +33,22 @@ def get_run_name(args: argparse.Namespace) -> str:
     return exp_name
 
 
-def load_checkpoint(save_dir: str, agent=None) -> tuple[int, bool]:
+def load_checkpoint(save_dir: str, agent=None, target_steps: Optional[int] = None) -> tuple[int, bool]:
     checkpoint_path = os.path.join(save_dir, "checkpoint.pt")
     if not os.path.exists(checkpoint_path):
         return 0, False
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    if checkpoint.get("status") == "completed":
+    next_step = checkpoint["next_step"]
+    # A completed checkpoint is complete only for the target used to create it.
+    # A larger requested target must restore the model and continue training.
+    if (target_steps is None and checkpoint.get("status") == "completed") or (
+        target_steps is not None and next_step > target_steps
+    ):
         return 0, True
 
     if agent is None:
-        return checkpoint["next_step"], False
+        return next_step, False
 
     agent.load_state_dict(checkpoint["agent_state_dict"])
     for name, state_dict in checkpoint["optimizer_states"].items():
@@ -59,7 +64,7 @@ def load_checkpoint(save_dir: str, agent=None) -> tuple[int, bool]:
     torch.set_rng_state(checkpoint["torch_rng_state"])
     if torch.cuda.is_available() and "torch_cuda_rng_state" in checkpoint:
         torch.cuda.set_rng_state_all(checkpoint["torch_cuda_rng_state"])
-    return checkpoint["next_step"], False
+    return next_step, False
 
 
 def save_checkpoint(
@@ -122,7 +127,9 @@ def run_training_loop(
         **config["agent_kwargs"],
     )
 
-    start_step, is_completed = load_checkpoint(args.save_dir, agent)
+    start_step, is_completed = load_checkpoint(
+        args.save_dir, agent, target_steps=args.training_steps
+    )
     if is_completed:
         return
 
@@ -229,10 +236,12 @@ def main(args, checkpoint_callback: Optional[Callable[[], None]] = None):
     args.save_dir = os.path.join(logdir_prefix, args.run_group, exp_name)
     os.makedirs(args.save_dir, exist_ok=True)
 
-    _, is_completed = load_checkpoint(args.save_dir)
+    next_step, is_completed = load_checkpoint(args.save_dir, target_steps=args.training_steps)
     if is_completed:
-        print(f"Run already completed at {args.save_dir}; skipping.")
+        print(f"Run already reached step {args.training_steps} at {args.save_dir}; skipping.")
         return
+    if next_step:
+        print(f"Continuing {args.save_dir} from step {next_step} to {args.training_steps}.", flush=True)
 
     config = configs.configs[args.base_config](args.env_name)
 
