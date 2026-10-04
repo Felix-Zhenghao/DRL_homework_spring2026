@@ -47,8 +47,7 @@ class ReplayBuffer:
         """
         if isinstance(reward, (float, int)):
             reward = np.array(reward)
-        if isinstance(done, bool):
-            done = np.array(done)
+        done = np.asarray(done, dtype=np.float32)
         if isinstance(action, int):
             action = np.array(action, dtype=np.int64)
 

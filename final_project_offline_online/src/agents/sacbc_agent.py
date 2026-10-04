@@ -1,6 +1,7 @@
 from typing import Optional
 import torch
 from torch import nn
+import torch.nn.functional as F
 import numpy as np
 import infrastructure.pytorch_util as ptu
 
@@ -42,6 +43,7 @@ class SACBCAgent(nn.Module):
 
         self.target_entropy = -action_dim / 2  # Heuristic value (|A| / 2) from the SAC paper.
 
+    @torch.no_grad
     def get_action(self, observation: np.ndarray):
         """
         Used for evaluation.
@@ -64,8 +66,13 @@ class SACBCAgent(nn.Module):
         Update Q(s, a)
         """
         # TODO(student): Compute the Q loss
-        q = ...
-        loss = ...
+        with torch.no_grad():
+            target_actions = self.actor(next_observations).rsample()
+            next_q_values = self.target_critic(next_observations, target_actions) # (n_ensembles, batch_size)
+            next_q_mean_values = next_q_values.mean(dim=0)  # (batch_size)
+            target_q_values = rewards + self.discount * (1 - dones) * next_q_mean_values
+        q = self.critic(observations, actions)  # (n_ensembles, batch_size)
+        loss = F.mse_loss(q, target_q_values.unsqueeze(0).expand_as(q))
 
         self.critic_optimizer.zero_grad()
         loss.backward()
@@ -88,12 +95,14 @@ class SACBCAgent(nn.Module):
         Update the actor
         """
         # TODO(student): Compute the actor loss
-        q_loss = ...
+        dist = self.actor(observations)
+        policy_actions = dist.rsample()
 
-        mses = ...
-        bc_loss = ...
+        q_loss = - self.critic(observations, policy_actions).mean()
 
-        entropy_loss = ...
+        bc_loss = self.alpha * F.mse_loss(policy_actions, actions)
+
+        entropy_loss = self.beta() * (dist.log_prob(policy_actions)).mean()
 
         loss = q_loss + bc_loss + entropy_loss
 
@@ -106,7 +115,6 @@ class SACBCAgent(nn.Module):
             "q_loss": q_loss,
             "bc_loss": bc_loss,
             "entropy_loss": entropy_loss,
-            "mse": mses.mean(),
         }
 
     @torch.compile
@@ -154,6 +162,12 @@ class SACBCAgent(nn.Module):
 
         return metrics
 
+    @torch.compile
+    @torch.no_grad
     def update_target_critic(self) -> None:
-        # TODO(student): Update target_critic using Polyak averaging with self.target_update_rate
-        ...
+        """Update the target critic using Polyak averaging."""
+        torch._foreach_lerp_(
+            list(self.target_critic.parameters()),
+            list(self.critic.parameters()),
+            self.target_update_rate,
+        )
